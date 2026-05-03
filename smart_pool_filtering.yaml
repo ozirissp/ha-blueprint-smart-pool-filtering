@@ -143,6 +143,8 @@ variables:
   filter_coefficient: !input filter_coefficient
   min_duration_hours: !input min_duration_hours
   max_duration_hours: !input max_duration_hours
+  # Capture the raw template string from the input so it can be evaluated below.
+  already_filtered_today_tpl: !input already_filtered_today
 
   # Temperature read from the statistics sensor (24h mean).
   # If unavailable (unknown/unavailable), defaults to 0 → min_duration applies.
@@ -161,9 +163,9 @@ variables:
   target_minutes: >
     {{ (calculated_duration_hours * 60) | round(1) }}
 
-  # Minutes already filtered today (from optional template input).
+  # Minutes already filtered today — evaluate the user-supplied template string.
   already_filtered_minutes: >
-    {{ [0, !input already_filtered_today | float(default=0)] | max }}
+    {{ [0, already_filtered_today_tpl | float(default=0)] | max }}
 
   # Remaining duration in seconds (never negative).
   remaining_seconds: >
