@@ -1,0 +1,229 @@
+blueprint:
+  name: "Smart Pool Filtering"
+  description: >
+    Automatically calculates the daily filtration duration based on the 24h average
+    water temperature (configurable divisor rule), with support for no-filter and
+    forced-filter calendar schedules.
+
+    **Prerequisites before using this blueprint:**
+
+    1. Create a **Statistics sensor** (native HA integration) pointing to your
+       temperature sensor, configured as `mean` over 24h. This is the sensor to
+       select in the "Temperature sensor" field. Do not use a raw temperature sensor.
+
+    2. Create two **Calendar entities**: one for no-filter periods (maintenance,
+       shock treatment, extended absence…) and one for forced-filter periods.
+
+  domain: automation
+  author: "Arnaud Masciotra"
+  homeassistant:
+    min_version: "2024.8.0"
+  source_url: https://github.com/ozirissp/ha-blueprint-smart-pool-filtering/blob/main/blueprint.yaml
+
+  input:
+
+    # --- Sensors -----------------------------------------------------------------
+
+    temperature_sensor:
+      name: "Temperature sensor (24h average)"
+      description: >
+        A HA statistics sensor configured as mean over 24h.
+        Do not use a raw temperature sensor.
+      selector:
+        entity:
+          domain: sensor
+          device_class: temperature
+
+    filtration_switch:
+      name: "Filtration switch"
+      description: Switch (or input_boolean) that controls the filtration pump.
+      selector:
+        entity:
+          domain:
+            - switch
+            - input_boolean
+
+    # --- Schedule ----------------------------------------------------------------
+
+    start_time:
+      name: "Filtration start time"
+      description: >
+        Time at which the automation triggers each day to evaluate
+        and start filtration.
+      default: "10:00:00"
+      selector:
+        time: {}
+
+    max_window_hours:
+      name: "Maximum filtration window (hours)"
+      description: >
+        Maximum time window from the start time. The automation will turn off
+        the switch at start_time + this duration, even if filtration is not
+        finished. Protects against stuck-on switches.
+      default: 12
+      selector:
+        number:
+          min: 1
+          max: 24
+          step: 0.5
+          unit_of_measurement: h
+          mode: slider
+
+    # --- Calculation parameters --------------------------------------------------
+
+    filter_coefficient:
+      name: "Filtration coefficient"
+      description: >
+        Divisor applied to the temperature to calculate the duration.
+        Formula: duration = temperature / coefficient.
+        Standard value: 3 (one-third rule).
+      default: 3
+      selector:
+        number:
+          min: 1
+          max: 10
+          step: 0.5
+          unit_of_measurement: "°C/h"
+          mode: slider
+
+    min_duration_hours:
+      name: "Minimum filtration duration (hours)"
+      description: >
+        Floor duration: filtration will never be shorter than this value,
+        even if the temperature is very low or the sensor is unavailable.
+      default: 2
+      selector:
+        number:
+          min: 0
+          max: 12
+          step: 0.5
+          unit_of_measurement: h
+          mode: slider
+
+    max_duration_hours:
+      name: "Maximum filtration duration (hours)"
+      description: >
+        Ceiling duration: filtration will never exceed this value,
+        even if the temperature is very high.
+      default: 12
+      selector:
+        number:
+          min: 1
+          max: 24
+          step: 0.5
+          unit_of_measurement: h
+          mode: slider
+
+    # --- Calendar schedules ------------------------------------------------------
+
+    no_filter_calendar:
+      name: "Calendar — No filtration"
+      description: >
+        Calendar entity representing periods when filtration is forbidden
+        (maintenance, shock treatment, extended absence…).
+        No-filter takes absolute priority, including over forced-filter.
+      selector:
+        entity:
+          domain: calendar
+
+    forced_filter_calendar:
+      name: "Calendar — Forced filtration"
+      description: >
+        Calendar entity representing periods when filtration must run
+        for the full configured window, regardless of the calculated duration.
+      selector:
+        entity:
+          domain: calendar
+
+# --- Automation --------------------------------------------------------------
+
+mode: single
+max_exceeded: silent
+
+trigger:
+  - platform: time
+    at: !input start_time
+
+variables:
+  temperature_sensor: !input temperature_sensor
+  filtration_switch: !input filtration_switch
+  filter_coefficient: !input filter_coefficient
+  min_duration_hours: !input min_duration_hours
+  max_duration_hours: !input max_duration_hours
+  max_window_hours: !input max_window_hours
+  no_filter_calendar: !input no_filter_calendar
+  forced_filter_calendar: !input forced_filter_calendar
+
+  # Temperature read from the statistics sensor (24h mean).
+  # If unavailable (unknown/unavailable), defaults to 0 → min_duration applies.
+  current_temp: >
+    {{ states(temperature_sensor) | float(default=0) }}
+
+  # Duration calculated by the divisor rule, clamped between min and max.
+  calculated_duration: >
+    {% set coeff = filter_coefficient | float(default=3) %}
+    {% set raw = current_temp / coeff if coeff > 0 else 0 %}
+    {% set clamped = [min_duration_hours | float(default=2),
+                      [max_duration_hours | float(default=12), raw] | min] | max %}
+    {{ clamped }}
+
+  # Duration in seconds for the delay action.
+  duration_seconds: >
+    {{ (calculated_duration * 3600) | int }}
+
+  # Safety window in seconds.
+  window_seconds: >
+    {{ (max_window_hours | float(default=12) * 3600) | int }}
+
+condition: []
+
+action:
+  # ── Step 1: Check no-filter calendar (absolute priority) ─────────────────────
+  - if:
+      - condition: state
+        entity_id: !input no_filter_calendar
+        state: "on"
+    then:
+      - stop: "Filtration blocked by no-filter calendar."
+
+  # ── Step 2: Ensure the switch is off before starting ─────────────────────────
+  - action: homeassistant.turn_off
+    target:
+      entity_id: !input filtration_switch
+
+  # ── Step 3: Forced filtration (full window) ───────────────────────────────────
+  - if:
+      - condition: state
+        entity_id: !input forced_filter_calendar
+        state: "on"
+    then:
+      - action: homeassistant.turn_on
+        target:
+          entity_id: !input filtration_switch
+      - delay:
+          seconds: "{{ window_seconds }}"
+      - action: homeassistant.turn_off
+        target:
+          entity_id: !input filtration_switch
+      - stop: "Forced filtration complete."
+
+  # ── Step 4: Normal logic — calculated duration ────────────────────────────────
+  - action: homeassistant.turn_on
+    target:
+      entity_id: !input filtration_switch
+
+  - delay:
+      seconds: "{{ duration_seconds }}"
+
+  - action: homeassistant.turn_off
+    target:
+      entity_id: !input filtration_switch
+
+  # ── Log entry visible in HA logs ─────────────────────────────────────────────
+  - action: system_log.write
+    data:
+      level: info
+      message: >
+        [Smart Pool Filtering]
+        Temp={{ current_temp | round(1) }}°C  Coeff={{ filter_coefficient }}
+        Duration={{ calculated_duration | round(2) }}h  ({{ duration_seconds }}s)
