@@ -18,7 +18,7 @@ blueprint:
   author: "Arnaud Masciotra"
   homeassistant:
     min_version: "2024.8.0"
-  source_url: https://github.com/ozirissp/ha-blueprint-smart-pool-filtering/blob/main/blueprint.yaml
+  source_url: https://github.com/ozirissp/ha-blueprint-smart-pool-filtering/blob/main/smart_pool_filtering.yaml
 
   input:
 
