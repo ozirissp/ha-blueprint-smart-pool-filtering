@@ -2,8 +2,13 @@ blueprint:
   name: "Smart Pool Filtering"
   description: >
     Automatically calculates the daily filtration duration based on the 24h average
-    water temperature (configurable divisor rule), with support for no-filter and
-    forced-filter calendar schedules.
+    water temperature (configurable divisor rule).
+
+    Formula: `duration = temperature / coefficient`, clamped between min and max.
+
+    Optionally, a template can return the filtration time already elapsed today
+    (in minutes): if the calculated target is already reached, the automation stops
+    immediately without starting the pump.
 
     **Prerequisites before using this blueprint:**
 
@@ -11,8 +16,8 @@ blueprint:
        temperature sensor, configured as `mean` over 24h. This is the sensor to
        select in the "Temperature sensor" field. Do not use a raw temperature sensor.
 
-    2. Create two **Calendar entities**: one for no-filter periods (maintenance,
-       shock treatment, extended absence…) and one for forced-filter periods.
+    2. Prepare a **start action** and a **stop action** (scripts, scenes, or any
+       HA action) that respectively start and stop your filtration pump.
 
   domain: automation
   author: "Arnaud Masciotra"
@@ -34,14 +39,23 @@ blueprint:
           domain: sensor
           device_class: temperature
 
-    filtration_switch:
-      name: "Filtration switch"
-      description: Switch (or input_boolean) that controls the filtration pump.
+    # --- Actions -----------------------------------------------------------------
+
+    start_action:
+      name: "Start filtration action"
+      description: >
+        Action(s) executed to start the filtration pump
+        (turn on a switch, call a script, activate a scene…).
       selector:
-        entity:
-          domain:
-            - switch
-            - input_boolean
+        action: {}
+
+    stop_action:
+      name: "Stop filtration action"
+      description: >
+        Action(s) executed to stop the filtration pump
+        (turn off a switch, call a script, activate a scene…).
+      selector:
+        action: {}
 
     # --- Schedule ----------------------------------------------------------------
 
@@ -53,21 +67,6 @@ blueprint:
       default: "10:00:00"
       selector:
         time: {}
-
-    max_window_hours:
-      name: "Maximum filtration window (hours)"
-      description: >
-        Maximum time window from the start time. The automation will turn off
-        the switch at start_time + this duration, even if filtration is not
-        finished. Protects against stuck-on switches.
-      default: 12
-      selector:
-        number:
-          min: 1
-          max: 24
-          step: 0.5
-          unit_of_measurement: h
-          mode: slider
 
     # --- Calculation parameters --------------------------------------------------
 
@@ -114,26 +113,21 @@ blueprint:
           unit_of_measurement: h
           mode: slider
 
-    # --- Calendar schedules ------------------------------------------------------
+    # --- Optional: already-filtered today ----------------------------------------
 
-    no_filter_calendar:
-      name: "Calendar — No filtration"
+    already_filtered_today:
+      name: "Already filtered today (template, optional)"
       description: >
-        Calendar entity representing periods when filtration is forbidden
-        (maintenance, shock treatment, extended absence…).
-        No-filter takes absolute priority, including over forced-filter.
-      selector:
-        entity:
-          domain: calendar
+        Jinja2 template returning the number of minutes already filtered today.
+        If the calculated target duration is already reached, the automation
+        stops immediately without starting the pump.
 
-    forced_filter_calendar:
-      name: "Calendar — Forced filtration"
-      description: >
-        Calendar entity representing periods when filtration must run
-        for the full configured window, regardless of the calculated duration.
+        Leave empty (or set to `0`) to always run the full calculated duration.
+
+        Example: `{{ states('sensor.pool_filter_today_minutes') | float(0) }}`
+      default: "0"
       selector:
-        entity:
-          domain: calendar
+        template: {}
 
 # --- Automation --------------------------------------------------------------
 
@@ -146,13 +140,9 @@ trigger:
 
 variables:
   temperature_sensor: !input temperature_sensor
-  filtration_switch: !input filtration_switch
   filter_coefficient: !input filter_coefficient
   min_duration_hours: !input min_duration_hours
   max_duration_hours: !input max_duration_hours
-  max_window_hours: !input max_window_hours
-  no_filter_calendar: !input no_filter_calendar
-  forced_filter_calendar: !input forced_filter_calendar
 
   # Temperature read from the statistics sensor (24h mean).
   # If unavailable (unknown/unavailable), defaults to 0 → min_duration applies.
@@ -160,70 +150,63 @@ variables:
     {{ states(temperature_sensor) | float(default=0) }}
 
   # Duration calculated by the divisor rule, clamped between min and max.
-  calculated_duration: >
+  calculated_duration_hours: >
     {% set coeff = filter_coefficient | float(default=3) %}
     {% set raw = current_temp / coeff if coeff > 0 else 0 %}
     {% set clamped = [min_duration_hours | float(default=2),
                       [max_duration_hours | float(default=12), raw] | min] | max %}
     {{ clamped }}
 
-  # Duration in seconds for the delay action.
-  duration_seconds: >
-    {{ (calculated_duration * 3600) | int }}
+  # Target duration in minutes.
+  target_minutes: >
+    {{ (calculated_duration_hours * 60) | round(1) }}
 
-  # Safety window in seconds.
-  window_seconds: >
-    {{ (max_window_hours | float(default=12) * 3600) | int }}
+  # Minutes already filtered today (from optional template input).
+  already_filtered_minutes: >
+    {{ [0, !input already_filtered_today | float(default=0)] | max }}
+
+  # Remaining duration in seconds (never negative).
+  remaining_seconds: >
+    {% set target_s = calculated_duration_hours * 3600 %}
+    {% set done_s   = already_filtered_minutes * 60 %}
+    {{ [0, (target_s - done_s) | int] | max }}
 
 condition: []
 
 action:
-  # ── Step 1: Check no-filter calendar (absolute priority) ─────────────────────
+  # ── Step 1: Check if daily quota is already reached ───────────────────────────
   - if:
-      - condition: state
-        entity_id: !input no_filter_calendar
-        state: "on"
+      - condition: template
+        value_template: "{{ remaining_seconds <= 0 }}"
     then:
-      - stop: "Filtration blocked by no-filter calendar."
+      - stop: >
+          Daily filtration quota already reached
+          (target={{ target_minutes }}min, done={{ already_filtered_minutes }}min).
 
-  # ── Step 2: Ensure the switch is off before starting ─────────────────────────
-  - action: homeassistant.turn_off
-    target:
-      entity_id: !input filtration_switch
-
-  # ── Step 3: Forced filtration (full window) ───────────────────────────────────
-  - if:
-      - condition: state
-        entity_id: !input forced_filter_calendar
-        state: "on"
-    then:
-      - action: homeassistant.turn_on
-        target:
-          entity_id: !input filtration_switch
-      - delay:
-          seconds: "{{ window_seconds }}"
-      - action: homeassistant.turn_off
-        target:
-          entity_id: !input filtration_switch
-      - stop: "Forced filtration complete."
-
-  # ── Step 4: Normal logic — calculated duration ────────────────────────────────
-  - action: homeassistant.turn_on
-    target:
-      entity_id: !input filtration_switch
-
-  - delay:
-      seconds: "{{ duration_seconds }}"
-
-  - action: homeassistant.turn_off
-    target:
-      entity_id: !input filtration_switch
-
-  # ── Log entry visible in HA logs ─────────────────────────────────────────────
+  # ── Step 2: Start filtration ──────────────────────────────────────────────────
   - action: system_log.write
     data:
       level: info
       message: >
-        [Smart Pool Filtering]
+        [Smart Pool Filtering] Starting filtration.
         Temp={{ current_temp | round(1) }}°C  Coeff={{ filter_coefficient }}
-        Duration={{ calculated_duration | round(2) }}h  ({{ duration_seconds }}s)
+        Target={{ target_minutes }}min  AlreadyDone={{ already_filtered_minutes }}min
+        Remaining={{ (remaining_seconds / 60) | round(1) }}min
+
+  - sequence: !input start_action
+
+  # ── Step 3: Wait for calculated remaining duration ────────────────────────────
+  - delay:
+      seconds: "{{ remaining_seconds }}"
+
+  # ── Step 4: Stop filtration ───────────────────────────────────────────────────
+  - sequence: !input stop_action
+
+  # ── Step 5: Log completion ────────────────────────────────────────────────────
+  - action: system_log.write
+    data:
+      level: info
+      message: >
+        [Smart Pool Filtering] Filtration complete.
+        Temp={{ current_temp | round(1) }}°C  Coeff={{ filter_coefficient }}
+        Duration={{ (remaining_seconds / 60) | round(1) }}min
