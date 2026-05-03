@@ -113,6 +113,34 @@ blueprint:
           unit_of_measurement: h
           mode: slider
 
+    # --- Optional: output — calculated duration ----------------------------------
+
+    calculated_duration_output:
+      name: "Calculated duration output (input_number, optional)"
+      description: >
+        An `input_number` entity in which the blueprint will write the calculated
+        filtration duration (in minutes) each time it runs.
+
+        Leave empty to disable this output.
+
+        Create the helper beforehand via **Settings → Devices & Services → Helpers → Add helper → Number**,
+        or add it to your `configuration.yaml`:
+
+        ```yaml
+        input_number:
+          pool_filter_calculated_duration:
+            name: "Pool filter calculated duration"
+            min: 0
+            max: 720
+            step: 1
+            unit_of_measurement: min
+            icon: mdi:timer
+        ```
+      default: ""
+      selector:
+        entity:
+          domain: input_number
+
     # --- Optional: already-filtered today ----------------------------------------
 
     already_filtered_today:
@@ -143,6 +171,7 @@ variables:
   filter_coefficient: !input filter_coefficient
   min_duration_hours: !input min_duration_hours
   max_duration_hours: !input max_duration_hours
+  calculated_duration_output: !input calculated_duration_output
   # Capture the raw template string from the input so it can be evaluated below.
   already_filtered_today_tpl: !input already_filtered_today
 
@@ -185,7 +214,18 @@ action:
           Daily filtration quota already reached
           (target={{ target_minutes }}min, done={{ already_filtered_minutes }}min).
 
-  # ── Step 2: Start filtration ──────────────────────────────────────────────────
+  # ── Step 2: Write calculated duration to output entity (if configured) ───────
+  - if:
+      - condition: template
+        value_template: "{{ calculated_duration_output != '' }}"
+    then:
+      - action: input_number.set_value
+        target:
+          entity_id: "{{ calculated_duration_output }}"
+        data:
+          value: "{{ target_minutes }}"
+
+  # ── Step 3: Start filtration ──────────────────────────────────────────────────
   - action: system_log.write
     data:
       level: info
@@ -197,14 +237,14 @@ action:
 
   - sequence: !input start_action
 
-  # ── Step 3: Wait for calculated remaining duration ────────────────────────────
+  # ── Step 4: Wait for calculated remaining duration ────────────────────────────
   - delay:
       seconds: "{{ remaining_seconds }}"
 
-  # ── Step 4: Stop filtration ───────────────────────────────────────────────────
+  # ── Step 5: Stop filtration ───────────────────────────────────────────────────
   - sequence: !input stop_action
 
-  # ── Step 5: Log completion ────────────────────────────────────────────────────
+  # ── Step 6: Log completion ────────────────────────────────────────────────────
   - action: system_log.write
     data:
       level: info
