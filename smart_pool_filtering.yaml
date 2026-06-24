@@ -1,14 +1,13 @@
 blueprint:
   name: "Smart Pool Filtering"
   description: >
-    Automatically calculates the daily filtration duration based on the 24h average
-    water temperature (configurable divisor rule).
+    Calculates a daily target filtration duration from the 24h average water
+    temperature, writes it to an input_number, starts filtration at a configured
+    time, then checks a history sensor regularly and stops filtration when the
+    target duration is reached.
 
-    Formula: `duration = temperature / coefficient`, clamped between min and max.
-
-    Optionally, a template can return the filtration time already elapsed today
-    (in minutes): if the calculated target is already reached, the automation stops
-    immediately without starting the pump.
+    The target duration is calculated once per day at `calc_time` and can be
+    manually adjusted in the input_number before filtration starts.
 
     **Prerequisites before using this blueprint:**
 
@@ -16,7 +15,13 @@ blueprint:
        temperature sensor, configured as `mean` over 24h. This is the sensor to
        select in the "Temperature sensor" field. Do not use a raw temperature sensor.
 
-    2. Prepare a **start action** and a **stop action** (scripts, scenes, or any
+    2. Create an **input_number** helper that will store the target filtration
+       duration in minutes.
+
+    3. Create a **history_stats** or template sensor that returns the filtration
+       duration already completed today.
+
+    4. Prepare a **start action** and a **stop action** (scripts, scenes, or any
        HA action) that respectively start and stop your filtration pump.
 
   domain: automation
@@ -39,6 +44,42 @@ blueprint:
           domain: sensor
           device_class: temperature
 
+    history_sensor:
+      name: "Filtered duration today sensor"
+      description: >
+        Sensor returning the filtration duration already completed today.
+        This is typically a history_stats sensor on the pump state.
+      selector:
+        entity:
+          domain: sensor
+
+    history_unit:
+      name: "Filtered duration sensor unit"
+      description: >
+        Unit returned by the filtered duration sensor. history_stats with
+        `type: time` usually returns hours (`h`). If your sensor already returns
+        minutes, select `min`.
+      default: min
+      selector:
+        select:
+          options:
+            - label: "Minutes"
+              value: min
+            - label: "Hours"
+              value: h
+
+    # --- Output ------------------------------------------------------------------
+
+    duration_input_number:
+      name: "Target duration input_number"
+      description: >
+        input_number entity where the blueprint writes the calculated target
+        filtration duration in minutes. You can manually adjust this value
+        between the calculation time and the filtration start time.
+      selector:
+        entity:
+          domain: input_number
+
     # --- Actions -----------------------------------------------------------------
 
     start_action:
@@ -52,21 +93,44 @@ blueprint:
     stop_action:
       name: "Stop filtration action"
       description: >
-        Action(s) executed to stop the filtration pump
+        Action(s) executed when the filtered duration reaches the target duration
         (turn off a switch, call a script, activate a scene…).
       selector:
         action: {}
 
     # --- Schedule ----------------------------------------------------------------
 
+    calc_time:
+      name: "Daily calculation time"
+      description: >
+        Time at which the blueprint calculates the target filtration duration and
+        writes it to the input_number.
+      default: "06:00:00"
+      selector:
+        time: {}
+
     start_time:
       name: "Filtration start time"
       description: >
-        Time at which the automation triggers each day to evaluate
-        and start filtration.
+        Time at which the blueprint executes the start action. The input_number
+        value is read as-is, so it can be manually adjusted after calculation.
       default: "10:00:00"
       selector:
         time: {}
+
+    poll_interval_minutes:
+      name: "Verification interval (minutes)"
+      description: >
+        Frequency at which the blueprint checks whether the filtered duration has
+        reached the target duration.
+      default: 15
+      selector:
+        number:
+          min: 1
+          max: 30
+          step: 1
+          unit_of_measurement: min
+          mode: slider
 
     # --- Calculation parameters --------------------------------------------------
 
@@ -85,77 +149,33 @@ blueprint:
           unit_of_measurement: "°C/h"
           mode: slider
 
-    min_duration_hours:
-      name: "Minimum filtration duration (hours)"
+    min_duration_minutes:
+      name: "Minimum filtration duration (minutes)"
       description: >
-        Floor duration: filtration will never be shorter than this value,
+        Floor duration in minutes: filtration will never be shorter than this value,
         even if the temperature is very low or the sensor is unavailable.
-      default: 2
+      default: 120
       selector:
         number:
           min: 0
-          max: 12
-          step: 0.5
-          unit_of_measurement: h
+          max: 720
+          step: 5
+          unit_of_measurement: min
           mode: slider
 
-    max_duration_hours:
-      name: "Maximum filtration duration (hours)"
+    max_duration_minutes:
+      name: "Maximum filtration duration (minutes)"
       description: >
-        Ceiling duration: filtration will never exceed this value,
+        Ceiling duration in minutes: filtration will never exceed this value,
         even if the temperature is very high.
-      default: 12
+      default: 720
       selector:
         number:
-          min: 1
-          max: 24
-          step: 0.5
-          unit_of_measurement: h
+          min: 5
+          max: 1440
+          step: 5
+          unit_of_measurement: min
           mode: slider
-
-    # --- Optional: output — calculated duration ----------------------------------
-
-    calculated_duration_output:
-      name: "Calculated duration output (input_number, optional)"
-      description: >
-        An `input_number` entity in which the blueprint will write the calculated
-        filtration duration (in minutes) each time it runs.
-
-        Leave empty to disable this output.
-
-        Create the helper beforehand via **Settings → Devices & Services → Helpers → Add helper → Number**,
-        or add it to your `configuration.yaml`:
-
-        ```yaml
-        input_number:
-          pool_filter_calculated_duration:
-            name: "Pool filter calculated duration"
-            min: 0
-            max: 720
-            step: 1
-            unit_of_measurement: min
-            icon: mdi:timer
-        ```
-      default: ""
-      selector:
-        entity:
-          domain: input_number
-
-    # --- Optional: already-filtered today ----------------------------------------
-
-    already_filtered_today:
-      name: "Already filtered today (template, optional)"
-      description: >
-        Jinja2 template returning the number of minutes already filtered today.
-        If the calculated target duration is already reached, the automation
-        stops immediately without starting the pump.
-
-        Leave empty (or set to `0`) to always run the full calculated duration.
-
-        Example: `{{ states('sensor.pool_filter_today_minutes') | float(0) }}`
-      default: "0"
-      selector:
-        template: {}
 
 # --- Automation --------------------------------------------------------------
 
@@ -164,91 +184,126 @@ max_exceeded: silent
 
 trigger:
   - platform: time
+    at: !input calc_time
+    id: calc
+
+  - platform: time
     at: !input start_time
+    id: start
+
+  # The effective interval is controlled by poll_interval_minutes in the action.
+  # This is the standard blueprint-compatible pattern for configurable polling.
+  - platform: time_pattern
+    minutes: "/1"
+    id: poll
 
 variables:
   temperature_sensor: !input temperature_sensor
+  history_sensor: !input history_sensor
+  history_unit: !input history_unit
+  duration_input_number: !input duration_input_number
+  poll_interval_minutes: !input poll_interval_minutes
   filter_coefficient: !input filter_coefficient
-  min_duration_hours: !input min_duration_hours
-  max_duration_hours: !input max_duration_hours
-  calculated_duration_output: !input calculated_duration_output
-  # Capture the raw template string from the input so it can be evaluated below.
-  already_filtered_today_tpl: !input already_filtered_today
+  min_duration_minutes: !input min_duration_minutes
+  max_duration_minutes: !input max_duration_minutes
 
-  # Temperature read from the statistics sensor (24h mean).
-  # If unavailable (unknown/unavailable), defaults to 0 → min_duration applies.
   current_temp: >
     {{ states(temperature_sensor) | float(default=0) }}
 
-  # Duration calculated by the divisor rule, clamped between min and max.
-  calculated_duration_hours: >
+  # Raw duration in minutes from the temperature / coefficient rule,
+  # then clamped between min and max (both in minutes).
+  calculated_duration_minutes: >
     {% set coeff = filter_coefficient | float(default=3) %}
-    {% set raw = current_temp / coeff if coeff > 0 else 0 %}
-    {% set clamped = [min_duration_hours | float(default=2),
-                      [max_duration_hours | float(default=12), raw] | min] | max %}
-    {{ clamped }}
+    {% set temp  = current_temp | float(default=0) %}
+    {% set raw   = (temp / coeff * 60) if coeff > 0 else 0 %}
+    {% set mn    = min_duration_minutes | float(default=120) %}
+    {% set mx    = max_duration_minutes | float(default=720) %}
+    {{ [mn, [mx, raw] | min] | max | round(0) | int }}
 
-  # Target duration in minutes.
-  target_minutes: >
-    {{ (calculated_duration_hours * 60) | round(1) }}
+  target_duration_minutes: >
+    {{ states(duration_input_number) | float(default=0) }}
 
-  # Minutes already filtered today — evaluate the user-supplied template string.
-  already_filtered_minutes: >
-    {{ [0, already_filtered_today_tpl | float(default=0)] | max }}
-
-  # Remaining duration in seconds (never negative).
-  remaining_seconds: >
-    {% set target_s = calculated_duration_hours * 3600 %}
-    {% set done_s   = already_filtered_minutes * 60 %}
-    {{ [0, (target_s - done_s) | int] | max }}
-
-condition: []
+  filtered_duration_minutes: >
+    {% set raw = states(history_sensor) | float(default=0) %}
+    {{ (raw * 60 if history_unit == 'h' else raw) | round(1) }}
 
 action:
-  # ── Step 1: Check if daily quota is already reached ───────────────────────────
-  - if:
-      - condition: template
-        value_template: "{{ remaining_seconds <= 0 }}"
-    then:
-      - stop: >
-          Daily filtration quota already reached
-          (target={{ target_minutes }}min, done={{ already_filtered_minutes }}min).
+  - choose:
 
-  # ── Step 2: Write calculated duration to output entity (if configured) ───────
-  - if:
-      - condition: template
-        value_template: "{{ calculated_duration_output != '' }}"
-    then:
-      - action: input_number.set_value
-        target:
-          entity_id: "{{ calculated_duration_output }}"
-        data:
-          value: "{{ target_minutes }}"
+      # ── Daily calculation ------------------------------------------------------
+      - conditions:
+          - condition: trigger
+            id: calc
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: !input duration_input_number
+            data:
+              value: "{{ calculated_duration_minutes }}"
 
-  # ── Step 3: Start filtration ──────────────────────────────────────────────────
-  - action: system_log.write
-    data:
-      level: info
-      message: >
-        [Smart Pool Filtering] Starting filtration.
-        Temp={{ current_temp | round(1) }}°C  Coeff={{ filter_coefficient }}
-        Target={{ target_minutes }}min  AlreadyDone={{ already_filtered_minutes }}min
-        Remaining={{ (remaining_seconds / 60) | round(1) }}min
+          - action: system_log.write
+            data:
+              level: info
+              message: >
+                [Smart Pool Filtering] Calculated daily target duration:
+                {{ calculated_duration_minutes }}min
+                (temp={{ current_temp | float(default=0) | round(1) }}°C,
+                coeff={{ filter_coefficient }},
+                min={{ min_duration_minutes }}min,
+                max={{ max_duration_minutes }}min).
+                The input_number can be manually adjusted before filtration starts.
 
-  - sequence: !input start_action
+      # ── Start filtration -------------------------------------------------------
+      - conditions:
+          - condition: trigger
+            id: start
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ target_duration_minutes | float(default=0) <= 0 }}"
+            then:
+              - action: system_log.write
+                data:
+                  level: warning
+                  message: >
+                    [Smart Pool Filtering] Filtration start skipped because target
+                    duration is {{ target_duration_minutes | float(default=0) | round(1) }}min.
 
-  # ── Step 4: Wait for calculated remaining duration ────────────────────────────
-  - delay:
-      seconds: "{{ remaining_seconds }}"
+              - stop: "Target filtration duration is zero."
 
-  # ── Step 5: Stop filtration ───────────────────────────────────────────────────
-  - sequence: !input stop_action
+          - sequence: !input start_action
 
-  # ── Step 6: Log completion ────────────────────────────────────────────────────
-  - action: system_log.write
-    data:
-      level: info
-      message: >
-        [Smart Pool Filtering] Filtration complete.
-        Temp={{ current_temp | round(1) }}°C  Coeff={{ filter_coefficient }}
-        Duration={{ (remaining_seconds / 60) | round(1) }}min
+          - action: system_log.write
+            data:
+              level: info
+              message: >
+                [Smart Pool Filtering] Filtration started.
+                Target={{ target_duration_minutes | float(default=0) | round(1) }}min.
+
+      # ── Regular quota verification -------------------------------------------
+      - conditions:
+          - condition: trigger
+            id: poll
+          - condition: template
+            value_template: >
+              {% set interval = poll_interval_minutes | int(default=15) %}
+              {{ interval > 0 and now().minute % interval == 0 }}
+        sequence:
+          - if:
+              - condition: template
+                value_template: >
+                  {{ target_duration_minutes | float(default=0) > 0 and
+                     filtered_duration_minutes | float(default=0) >=
+                     target_duration_minutes | float(default=0) }}
+            then:
+              - sequence: !input stop_action
+
+              - action: system_log.write
+                data:
+                  level: info
+                  message: >
+                    [Smart Pool Filtering] Target duration reached. Stopping filtration.
+                    Filtered={{ filtered_duration_minutes | float(default=0) | round(1) }}min
+                    Target={{ target_duration_minutes | float(default=0) | round(1) }}min.
+
+              - stop: "Target filtration duration reached."

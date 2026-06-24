@@ -1,29 +1,31 @@
 # ha-blueprint-smart-pool-filtering
 
-Blueprint Home Assistant pour la filtration intelligente de piscine. Calcule automatiquement la durée de filtration journalière à partir de la température moyenne sur 24h (règle du tiers configurable). Entièrement configurable via l'UI HA.
+Blueprint Home Assistant pour la filtration intelligente de piscine. Il calcule une durée cible journalière à partir de la température moyenne 24h, l'écrit dans un `input_number`, démarre la filtration à une heure configurable, puis vérifie régulièrement un sensor d'historique pour arrêter la pompe quand le quota est atteint.
 
 ## Fonctionnement
+
+La durée cible est calculée une fois par jour :
 
 ```
 durée_brute   = température_24h / coefficient
 durée_finale  = max(durée_min, min(durée_max, durée_brute))
 ```
 
-À l'heure de démarrage configurée, l'automation :
+Le blueprint utilise trois déclencheurs :
 
-1. Vérifie si le quota journalier est déjà atteint (optionnel)
-2. Exécute l'**action de démarrage** de la pompe
-3. Attend la durée calculée (ou la durée restante si un sensor est configuré)
-4. Exécute l'**action d'arrêt** de la pompe
+1. **Calcul** à `calc_time` : calcule la durée cible et l'écrit dans l'`input_number` en minutes.
+2. **Démarrage** à `start_time` : exécute l'action de démarrage de la pompe.
+3. **Surveillance** toutes les X minutes : lit le sensor d'historique et arrête la pompe si `durée_filtrée >= durée_cible`.
+
+Entre l'heure de calcul et l'heure de démarrage, l'utilisateur peut modifier manuellement l'`input_number` pour ajuster la durée du jour.
 
 ## Prérequis
 
-### 1. Statistics sensor (obligatoire)
+### 1. Statistics sensor
 
-Créer un sensor de statistiques natif HA pointant sur le capteur de température, configuré en `mean` sur 24h. C'est ce sensor qui est sélectionné dans le champ **"Temperature sensor"**.
+Créer un sensor de statistiques natif HA pointant sur le capteur de température, configuré en `mean` sur 24h. C'est ce sensor qui est sélectionné dans le champ **Temperature sensor**.
 
 ```yaml
-# configuration.yaml ou via l'UI
 sensor:
   - platform: statistics
     name: "Pool temperature 24h mean"
@@ -33,58 +35,74 @@ sensor:
       hours: 24
 ```
 
-### 2. Actions de démarrage et d'arrêt (obligatoires)
+### 2. input_number de durée cible
 
-Préparer une action pour démarrer la pompe et une pour l'arrêter. Il peut s'agir de :
-- `homeassistant.turn_on` / `turn_off` sur un switch ou input_boolean
-- L'appel d'un script
-- L'activation d'une scène
+Créer un helper `input_number` qui stocke la durée cible en minutes.
 
-### 3. Sensor "déjà filtré aujourd'hui" (optionnel)
+```yaml
+input_number:
+  pool_filter_target_duration:
+    name: "Pool filter target duration"
+    min: 0
+    max: 720
+    step: 1
+    unit_of_measurement: min
+    icon: mdi:timer
+```
 
-Un template ou un sensor retournant le nombre de **minutes** déjà filtrées aujourd'hui. Si la durée calculée est déjà atteinte, la filtration ne démarre pas.
+### 3. Sensor d'historique
 
-Exemple avec un `history_stats` sensor :
+Créer un sensor qui retourne la durée filtrée aujourd'hui. Avec `history_stats`, `type: time` retourne des **heures**.
 
 ```yaml
 sensor:
   - platform: history_stats
-    name: "Pool filter today minutes"
+    name: "Pool filter today"
     entity_id: switch.pool_pump
     state: "on"
     type: time
-    start: "{{ now().replace(hour=0, minute=0, second=0) }}"
+    start: "{{ today_at() }}"
     end: "{{ now() }}"
 ```
 
-Le template à saisir dans le blueprint :
+Dans le blueprint, sélectionner l'unité du sensor :
 
-```
-{{ (states('sensor.pool_filter_today_minutes') | float(0) * 60) | round(0) }}
-```
+- `h` si le sensor retourne des heures (cas standard `history_stats type: time`)
+- `min` si le sensor retourne déjà des minutes
 
-*(history_stats retourne des heures → multiplier par 60 pour obtenir des minutes)*
+### 4. Actions de démarrage et d'arrêt
+
+Préparer une action pour démarrer la pompe et une pour l'arrêter. Il peut s'agir de :
+
+- `homeassistant.turn_on` / `homeassistant.turn_off` sur un switch ou input_boolean
+- L'appel d'un script
+- L'activation d'une scène
 
 ## Paramètres
 
 | Paramètre | Défaut | Description |
-|---|---|---|
-| Temperature sensor | — | Statistics sensor (mean 24h) |
+|---|---:|---|
+| Temperature sensor | — | Statistics sensor 24h mean |
+| Filtered duration today sensor | — | Sensor d'historique de filtration du jour |
+| Filtered duration sensor unit | `min` | Unité du sensor d'historique : `min` ou `h` |
+| Target duration input_number | — | Entité où écrire/lire la durée cible en minutes |
 | Start filtration action | — | Action HA pour démarrer la pompe |
 | Stop filtration action | — | Action HA pour arrêter la pompe |
-| Filtration start time | 10:00 | Heure de déclenchement quotidien |
-| Filtration coefficient | 3 | Diviseur température → durée |
-| Minimum duration | 2h | Plancher (sensor indisponible → min) |
-| Maximum duration | 12h | Plafond de filtration |
-| Already filtered today | 0 | Template Jinja2 (minutes déjà filtrées) |
+| Daily calculation time | `06:00` | Heure de calcul de la durée cible |
+| Filtration start time | `10:00` | Heure de démarrage de la filtration |
+| Verification interval | `15 min` | Fréquence de vérification du quota |
+| Filtration coefficient | `3` | Diviseur température → durée |
+| Minimum duration | `2h` | Durée minimum |
+| Maximum duration | `12h` | Durée maximum |
 
 ## Comportements notables
 
-- **Sensor indisponible** (`unknown`/`unavailable`) → durée tombe à `durée_min`
-- **Durée calculée < min** → clampée à `durée_min`
-- **Durée calculée > max** → clampée à `durée_max`
-- **Quota déjà atteint** → l'automation s'arrête sans démarrer la pompe
-- **`mode: single`** → pas d'instances parallèles, `max_exceeded: silent`
+- La durée cible est calculée uniquement à `calc_time`.
+- Le démarrage à `start_time` ne recalcule pas la durée : il utilise la valeur actuelle de l'`input_number`.
+- Si la pompe s'arrête toute seule avant quota, le blueprint ne la redémarre pas.
+- Le blueprint appelle `stop_action` quand le sensor d'historique atteint ou dépasse la durée cible.
+- Le polling utilise un trigger toutes les minutes, filtré par `Verification interval`.
+- `mode: single` + `max_exceeded: silent` évitent les instances parallèles et le spam de logs.
 
 ## Installation
 
