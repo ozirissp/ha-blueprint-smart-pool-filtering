@@ -1,19 +1,18 @@
 blueprint:
   name: "Smart Pool Filtering"
   description: >
-    Calculates a daily target filtration duration from the 24h average water
-    temperature, writes it to an input_number, starts filtration at a configured
-    time, then checks a history sensor regularly and stops filtration when the
-    target duration is reached.
+    Calculates a daily target filtration duration from the water temperature,
+    writes it to an input_number, starts filtration at a configured time, then
+    checks a history sensor regularly and stops filtration when the target
+    duration is reached.
 
     The target duration is calculated once per day at `calc_time` and can be
     manually adjusted in the input_number before filtration starts.
 
     **Prerequisites before using this blueprint:**
 
-    1. Create a **Statistics sensor** (native HA integration) pointing to your
-       temperature sensor, configured as `mean` over 24h. This is the sensor to
-       select in the "Temperature sensor" field. Do not use a raw temperature sensor.
+    1. Any sensor returning a water temperature (raw sensor, statistics mean,
+       template sensor…). Select it in the "Water temperature sensor" field.
 
     2. Create an **input_number** helper that will store the target filtration
        duration in minutes.
@@ -35,10 +34,11 @@ blueprint:
     # --- Sensors -----------------------------------------------------------------
 
     temperature_sensor:
-      name: "Temperature sensor (24h average)"
+      name: "Water temperature sensor"
       description: >
-        A HA statistics sensor configured as mean over 24h.
-        Do not use a raw temperature sensor.
+        Sensor returning the current water temperature. This can be a raw
+        temperature sensor, a statistics sensor (mean), a template sensor, or
+        any entity with device_class temperature.
       selector:
         entity:
           domain: sensor

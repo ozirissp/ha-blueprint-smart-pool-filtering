@@ -1,13 +1,13 @@
 # ha-blueprint-smart-pool-filtering
 
-Blueprint Home Assistant pour la filtration intelligente de piscine. Il calcule une durée cible journalière à partir de la température moyenne 24h, l'écrit dans un `input_number`, démarre la filtration à une heure configurable, puis vérifie régulièrement un sensor d'historique pour arrêter la pompe quand le quota est atteint.
+Blueprint Home Assistant pour la filtration intelligente de piscine. Il calcule une durée cible journalière à partir de la température de l'eau, l'écrit dans un `input_number`, démarre la filtration à une heure configurable, puis vérifie régulièrement un sensor d'historique pour arrêter la pompe quand le quota est atteint.
 
 ## Fonctionnement
 
 La durée cible est calculée une fois par jour :
 
 ```
-durée_brute   = température_24h / coefficient
+durée_brute   = température / coefficient
 durée_finale  = max(durée_min, min(durée_max, durée_brute))
 ```
 
@@ -21,11 +21,17 @@ Entre l'heure de calcul et l'heure de démarrage, l'utilisateur peut modifier ma
 
 ## Prérequis
 
-### 1. Statistics sensor
+### 1. Sensor de température
 
-Créer un sensor de statistiques natif HA pointant sur le capteur de température, configuré en `mean` sur 24h. C'est ce sensor qui est sélectionné dans le champ **Temperature sensor**.
+N'importe quel sensor retournant une température de l'eau avec `device_class: temperature`. Il peut s'agir d'un sensor brut, d'un sensor de statistiques, ou d'un template sensor.
+
+Exemples :
 
 ```yaml
+# Sensor brut (directement depuis l'intégration de la sonde)
+sensor.pool_temperature
+
+# Statistics sensor (moyenne sur 24h)
 sensor:
   - platform: statistics
     name: "Pool temperature 24h mean"
@@ -33,6 +39,14 @@ sensor:
     state_characteristic: mean
     max_age:
       hours: 24
+
+# Template sensor
+template:
+  - sensor:
+      - name: "Pool temperature smoothed"
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state: "{{ states('sensor.pool_temperature') | float(20) }}"
 ```
 
 ### 2. input_number de durée cible
@@ -82,7 +96,7 @@ Préparer une action pour démarrer la pompe et une pour l'arrêter. Il peut s'a
 
 | Paramètre | Défaut | Description |
 |---|---:|---|
-| Temperature sensor | — | Statistics sensor 24h mean |
+| Water temperature sensor | — | Sensor de température (raw, statistics, template…) |
 | Filtered duration today sensor | — | Sensor d'historique de filtration du jour |
 | Filtered duration sensor unit | `min` | Unité du sensor d'historique : `min` ou `h` |
 | Target duration input_number | — | Entité où écrire/lire la durée cible en minutes |
