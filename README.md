@@ -79,10 +79,7 @@ sensor:
     end: "{{ now() }}"
 ```
 
-Dans le blueprint, sélectionner l'unité du sensor :
-
-- `h` si le sensor retourne des heures (cas standard `history_stats type: time`)
-- `min` si le sensor retourne déjà des minutes
+Le blueprint détecte automatiquement l'unité via l'attribut `unit_of_measurement` du sensor (fallback sur `h` si absent). Aucune configuration supplémentaire requise.
 
 ### 4. Actions de démarrage et d'arrêt
 
@@ -98,7 +95,6 @@ Préparer une action pour démarrer la pompe et une pour l'arrêter. Il peut s'a
 |---|---:|---|
 | Water temperature sensor | — | Sensor de température (raw, statistics, template…) |
 | Filtered duration today sensor | — | Sensor d'historique de filtration du jour |
-| Filtered duration sensor unit | `min` | Unité du sensor d'historique : `min` ou `h` |
 | Target duration input_number | — | Entité où écrire/lire la durée cible en minutes |
 | Start filtration action | — | Action HA pour démarrer la pompe |
 | Stop filtration action | — | Action HA pour arrêter la pompe |

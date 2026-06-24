@@ -53,21 +53,6 @@ blueprint:
         entity:
           domain: sensor
 
-    history_unit:
-      name: "Filtered duration sensor unit"
-      description: >
-        Unit returned by the filtered duration sensor. history_stats with
-        `type: time` usually returns hours (`h`). If your sensor already returns
-        minutes, select `min`.
-      default: min
-      selector:
-        select:
-          options:
-            - label: "Minutes"
-              value: min
-            - label: "Hours"
-              value: h
-
     # --- Output ------------------------------------------------------------------
 
     duration_input_number:
@@ -200,7 +185,6 @@ trigger:
 variables:
   temperature_sensor: !input temperature_sensor
   history_sensor: !input history_sensor
-  history_unit: !input history_unit
   duration_input_number: !input duration_input_number
   poll_interval_minutes: !input poll_interval_minutes
   filter_coefficient: !input filter_coefficient
@@ -224,8 +208,9 @@ variables:
     {{ states(duration_input_number) | float(default=0) }}
 
   filtered_duration_minutes: >
-    {% set raw = states(history_sensor) | float(default=0) %}
-    {{ (raw * 60 if history_unit == 'h' else raw) | round(1) }}
+    {% set raw  = states(history_sensor) | float(default=0) %}
+    {% set unit = state_attr(history_sensor, 'unit_of_measurement') | default('h') %}
+    {{ (raw * 60 if unit == 'h' else raw) | round(1) }}
 
 action:
   - choose:
