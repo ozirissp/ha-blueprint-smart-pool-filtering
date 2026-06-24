@@ -51,7 +51,20 @@ template:
 
 ### 2. input_number de durée cible
 
-Créer un helper `input_number` qui stocke la durée cible en minutes.
+Créer un helper **Number** via l'UI HA :
+
+**Paramètres → Appareils et services → Entrées → Ajouter → Nombre**
+
+| Champ | Valeur |
+|---|---|
+| Nom | Pool filter target duration |
+| Valeur min | 0 |
+| Valeur max | 720 |
+| Pas | 1 |
+| Unité | min |
+| Icône | `mdi:timer` |
+
+Ou en YAML (`configuration.yaml`) :
 
 ```yaml
 input_number:
@@ -64,9 +77,11 @@ input_number:
     icon: mdi:timer
 ```
 
-### 3. Sensor d'historique
+### 3. Sensor d'historique (history_stats)
 
-Créer un sensor qui retourne la durée filtrée aujourd'hui. Avec `history_stats`, `type: time` retourne des **heures**.
+Ce sensor mesure combien de temps la pompe a tourné aujourd'hui. Le blueprint lit sa valeur à chaque vérification et arrête la filtration quand le quota est atteint.
+
+Ajouter dans `configuration.yaml` (remplacer `switch.pool_pump` par l'entité qui représente ta pompe) :
 
 ```yaml
 sensor:
@@ -79,7 +94,9 @@ sensor:
     end: "{{ now() }}"
 ```
 
-Le blueprint détecte automatiquement l'unité via l'attribut `unit_of_measurement` du sensor (fallback sur `h` si absent). Aucune configuration supplémentaire requise.
+Puis redémarrer HA ou recharger les entités de configuration YAML.
+
+> Le blueprint détecte automatiquement l'unité du sensor via l'attribut `unit_of_measurement` (`h` pour `history_stats type: time`). Aucune configuration supplémentaire requise.
 
 ### 4. Actions de démarrage et d'arrêt
 
@@ -116,16 +133,26 @@ Préparer une action pour démarrer la pompe et une pour l'arrêter. Il peut s'a
 
 ## Installation
 
-### Via HACS
+### Import direct depuis l'UI HA (recommandé)
 
-Ajouter ce dépôt comme dépôt personnalisé dans HACS (type : Automation).
+1. Dans HA, aller dans **Paramètres → Automatisations → Blueprints**
+2. Cliquer sur **Importer un blueprint** (bouton en bas à droite)
+3. Coller l'URL du fichier raw GitHub :
+   ```
+   https://raw.githubusercontent.com/ozirissp/ha-blueprint-smart-pool-filtering/main/smart_pool_filtering.yaml
+   ```
+4. Cliquer **Aperçu** puis **Importer**
+
+Le blueprint est maintenant disponible dans la liste. Créer une automation depuis **Paramètres → Automatisations → Créer une automatisation → Depuis un blueprint**.
 
 ### Manuellement
 
 Copier `smart_pool_filtering.yaml` dans :
 
 ```
-config/blueprints/automation/smart_pool_filtering/
+config/blueprints/automation/smart_pool_filtering/smart_pool_filtering.yaml
 ```
 
-Puis **Paramètres → Automatisations → Blueprints → Recharger les blueprints**.
+Puis **Paramètres → Automatisations → Blueprints → ⋮ → Recharger les blueprints**.
+
+> **Mise à jour :** pour récupérer une nouvelle version du blueprint, supprimer l'ancien via l'UI et réimporter depuis l'URL. Les automatisations existantes devront être recréées.
