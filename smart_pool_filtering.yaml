@@ -204,8 +204,23 @@ variables:
     {% set mx_h  = max_duration_hours | float(default=12) %}
     {{ ([mn_h, [mx_h, raw_h] | min] | max * 60) | round(0) | int }}
 
+  # Unit declared on the input_number helper (min / h / s). Fallback: min.
+  input_number_unit: >
+    {{ state_attr(duration_input_number, 'unit_of_measurement') | default('min') | lower }}
+
+  # Value to WRITE into the input_number: internal minutes → target unit.
+  calculated_duration_output: >
+    {% set v = calculated_duration_minutes | float(default=0) %}
+    {{ (v / 60)  | round(2) if input_number_unit == 'h' else
+       (v * 60)  | round(0) | int if input_number_unit == 's' else
+        v        | round(0) | int }}
+
+  # Value READ from the input_number, converted back to internal minutes.
   target_duration_minutes: >
-    {{ states(duration_input_number) | float(default=0) }}
+    {% set raw = states(duration_input_number) | float(default=0) %}
+    {{ (raw * 60) if input_number_unit == 'h' else
+       (raw / 60) if input_number_unit == 's' else
+        raw }}
 
   filtered_duration_minutes: >
     {% set raw  = states(history_sensor) | float(default=0) %}
@@ -224,7 +239,7 @@ action:
             target:
               entity_id: !input duration_input_number
             data:
-              value: "{{ calculated_duration_minutes }}"
+              value: "{{ calculated_duration_output }}"
 
           - action: system_log.write
             data:
@@ -232,10 +247,11 @@ action:
               message: >
                 [Smart Pool Filtering] Calculated daily target duration:
                 {{ calculated_duration_minutes }}min
+                → written as {{ calculated_duration_output }}{{ input_number_unit }}
+                into {{ duration_input_number }}
                 (temp={{ current_temp | float(default=0) | round(1) }}°C,
                 coeff={{ filter_coefficient }},
-                  min={{ min_duration_hours }}h,
-                  max={{ max_duration_hours }}h).
+                min={{ min_duration_hours }}h, max={{ max_duration_hours }}h).
                 The input_number can be manually adjusted before filtration starts.
 
       # ── Start filtration -------------------------------------------------------
@@ -263,7 +279,9 @@ action:
               level: info
               message: >
                 [Smart Pool Filtering] Filtration started.
-                Target={{ target_duration_minutes | float(default=0) | round(1) }}min.
+                Target={{ target_duration_minutes | float(default=0) | round(1) }}min
+                (read {{ states(duration_input_number) | round(2) }}{{ input_number_unit }}
+                from {{ duration_input_number }}).
 
       # ── Regular quota verification -------------------------------------------
       - conditions:

@@ -59,12 +59,19 @@ Créer un helper **Number** via l'UI HA :
 |---|---|
 | Nom | Pool filter target duration |
 | Valeur min | 0 |
-| Valeur max | 720 |
-| Pas | 1 |
-| Unité | min |
+| Valeur max | 720 (si unité `min`) / 12 (si `h`) |
+| Pas | 1 (si `min`) / 0.5 (si `h`) |
+| Unité | `min`, `h` ou `s` |
 | Icône | `mdi:timer` |
 
-Ou en YAML (`configuration.yaml`) :
+Le blueprint détecte automatiquement l'unité déclarée sur ce helper via l'attribut `unit_of_measurement` et adapte :
+
+- La **valeur écrite** lors du calcul (ex. 120 → `2.0` si unité `h`)
+- La **valeur lue** lors de la vérification du quota (ex. `2.0h` → 120 min en interne)
+
+Les unités supportées sont `min` (défaut), `h` et `s`.
+
+Exemple en YAML (`configuration.yaml`) avec unité en minutes :
 
 ```yaml
 input_number:
@@ -74,6 +81,19 @@ input_number:
     max: 720
     step: 1
     unit_of_measurement: min
+    icon: mdi:timer
+```
+
+Exemple avec unité en heures :
+
+```yaml
+input_number:
+  pool_filter_target_duration:
+    name: "Pool filter target duration"
+    min: 0
+    max: 12
+    step: 0.5
+    unit_of_measurement: h
     icon: mdi:timer
 ```
 
@@ -112,7 +132,7 @@ Préparer une action pour démarrer la pompe et une pour l'arrêter. Il peut s'a
 |---|---:|---|
 | Water temperature sensor | — | Sensor de température (raw, statistics, template…) |
 | Filtered duration today sensor | — | Sensor d'historique de filtration du jour |
-| Target duration input_number | — | Entité où écrire/lire la durée cible en minutes |
+| Target duration input_number | — | Entité où écrire/lire la durée cible (unité détectée automatiquement : `min`, `h` ou `s`) |
 | Start filtration action | — | Action HA pour démarrer la pompe |
 | Stop filtration action | — | Action HA pour arrêter la pompe |
 | Daily calculation time | `06:00` | Heure de calcul de la durée cible |
@@ -125,6 +145,7 @@ Préparer une action pour démarrer la pompe et une pour l'arrêter. Il peut s'a
 ## Comportements notables
 
 - La durée cible est calculée uniquement à `calc_time`.
+- Le blueprint détecte automatiquement l'unité de l'`input_number` (`min`, `h`, `s`) et adapte l'écriture et la lecture en conséquence.
 - Le démarrage à `start_time` ne recalcule pas la durée : il utilise la valeur actuelle de l'`input_number`.
 - Si la pompe s'arrête toute seule avant quota, le blueprint ne la redémarre pas.
 - Le blueprint appelle `stop_action` quand le sensor d'historique atteint ou dépasse la durée cible.
