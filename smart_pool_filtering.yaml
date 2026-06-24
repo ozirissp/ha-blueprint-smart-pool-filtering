@@ -149,32 +149,32 @@ blueprint:
           unit_of_measurement: "°C/h"
           mode: slider
 
-    min_duration_minutes:
-      name: "Minimum filtration duration (minutes)"
+    min_duration_hours:
+      name: "Minimum filtration duration (hours)"
       description: >
-        Floor duration in minutes: filtration will never be shorter than this value,
+        Floor duration: filtration will never be shorter than this value,
         even if the temperature is very low or the sensor is unavailable.
-      default: 120
+      default: 2
       selector:
         number:
           min: 0
-          max: 720
-          step: 5
-          unit_of_measurement: min
+          max: 12
+          step: 0.5
+          unit_of_measurement: h
           mode: slider
 
-    max_duration_minutes:
-      name: "Maximum filtration duration (minutes)"
+    max_duration_hours:
+      name: "Maximum filtration duration (hours)"
       description: >
-        Ceiling duration in minutes: filtration will never exceed this value,
+        Ceiling duration: filtration will never exceed this value,
         even if the temperature is very high.
-      default: 720
+      default: 12
       selector:
         number:
-          min: 5
-          max: 1440
-          step: 5
-          unit_of_measurement: min
+          min: 1
+          max: 24
+          step: 0.5
+          unit_of_measurement: h
           mode: slider
 
 # --- Automation --------------------------------------------------------------
@@ -204,21 +204,21 @@ variables:
   duration_input_number: !input duration_input_number
   poll_interval_minutes: !input poll_interval_minutes
   filter_coefficient: !input filter_coefficient
-  min_duration_minutes: !input min_duration_minutes
-  max_duration_minutes: !input max_duration_minutes
+  min_duration_hours: !input min_duration_hours
+  max_duration_hours: !input max_duration_hours
 
   current_temp: >
     {{ states(temperature_sensor) | float(default=0) }}
 
-  # Raw duration in minutes from the temperature / coefficient rule,
-  # then clamped between min and max (both in minutes).
+  # Raw duration in hours from the temperature / coefficient rule,
+  # clamped between min and max (hours), then converted to minutes.
   calculated_duration_minutes: >
     {% set coeff = filter_coefficient | float(default=3) %}
     {% set temp  = current_temp | float(default=0) %}
-    {% set raw   = (temp / coeff * 60) if coeff > 0 else 0 %}
-    {% set mn    = min_duration_minutes | float(default=120) %}
-    {% set mx    = max_duration_minutes | float(default=720) %}
-    {{ [mn, [mx, raw] | min] | max | round(0) | int }}
+    {% set raw_h = (temp / coeff) if coeff > 0 else 0 %}
+    {% set mn_h  = min_duration_hours | float(default=2) %}
+    {% set mx_h  = max_duration_hours | float(default=12) %}
+    {{ ([mn_h, [mx_h, raw_h] | min] | max * 60) | round(0) | int }}
 
   target_duration_minutes: >
     {{ states(duration_input_number) | float(default=0) }}
@@ -249,8 +249,8 @@ action:
                 {{ calculated_duration_minutes }}min
                 (temp={{ current_temp | float(default=0) | round(1) }}°C,
                 coeff={{ filter_coefficient }},
-                min={{ min_duration_minutes }}min,
-                max={{ max_duration_minutes }}min).
+                  min={{ min_duration_hours }}h,
+                  max={{ max_duration_hours }}h).
                 The input_number can be manually adjusted before filtration starts.
 
       # ── Start filtration -------------------------------------------------------
