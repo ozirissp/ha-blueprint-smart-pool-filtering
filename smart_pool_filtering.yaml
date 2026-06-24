@@ -15,7 +15,7 @@ blueprint:
        template sensor…). Select it in the "Water temperature sensor" field.
 
     2. Create an **input_number** helper that will store the target filtration
-       duration in minutes.
+       duration. The unit (min, h or s) is auto-detected from the helper.
 
     3. Create a **history_stats** or template sensor that returns the filtration
        duration already completed today.
@@ -59,8 +59,9 @@ blueprint:
       name: "Target duration input_number"
       description: >
         input_number entity where the blueprint writes the calculated target
-        filtration duration in minutes. You can manually adjust this value
-        between the calculation time and the filtration start time.
+        filtration duration. The unit is auto-detected from the helper
+        (supported: min, h, s — default: min). You can manually adjust this
+        value between the calculation time and the filtration start time.
       selector:
         entity:
           domain: input_number
