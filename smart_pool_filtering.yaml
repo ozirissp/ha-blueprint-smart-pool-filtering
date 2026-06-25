@@ -1,27 +1,34 @@
 blueprint:
   name: "Smart Pool Filtering"
   description: >
-    Calculates a daily target filtration duration from the water temperature,
-    writes it to an input_number, starts filtration at a configured time, then
-    checks a history sensor regularly and stops filtration when the target
-    duration is reached.
+    Calculates a daily target filtration duration from the water temperature
+    (formula: temperature / coefficient), then distributes it over N cycles
+    spread evenly across a configurable time window [window_start, window_end].
 
-    The target duration is calculated once per day at `calc_time` and can be
-    manually adjusted in the input_number before filtration starts.
+    The number of cycles is auto-adjusted to respect per-cycle min/max duration
+    constraints. A polling mechanism checks every X minutes whether the pump
+    should be running (inside a cycle) or stopped (between cycles or outside
+    the window), and acts accordingly.
+
+    A calculated duration is written to an input_number helper once per day
+    (at calc_time). It can be manually adjusted before the window opens.
+
+    An external event trigger (configurable event type) forces an immediate
+    recalculation and cycle re-evaluation at any time.
 
     **Prerequisites before using this blueprint:**
 
-    1. Any sensor returning a water temperature (raw sensor, statistics mean,
-       template sensor…). Select it in the "Water temperature sensor" field.
+    1. Any sensor returning the water temperature with device_class temperature
+       (raw sensor, statistics mean, template sensor…).
 
-    2. Create an **input_number** helper that will store the target filtration
-       duration. The unit (min, h or s) is auto-detected from the helper.
+    2. An **input_number** helper that stores the target filtration duration.
+       The unit (min, h or s) is auto-detected from the helper.
 
-    3. Create a **history_stats** or template sensor that returns the filtration
-       duration already completed today.
+    3. A **pump state sensor** (switch, input_boolean, binary_sensor or sensor)
+       whose state is `on` when the pump is running.
 
-    4. Prepare a **start action** and a **stop action** (scripts, scenes, or any
-       HA action) that respectively start and stop your filtration pump.
+    4. A **start action** and a **stop action** (script, scene, turn_on/off…)
+       that start and stop the filtration pump. Both should be idempotent.
 
   domain: automation
   author: "Arnaud Masciotra"
@@ -44,14 +51,19 @@ blueprint:
           domain: sensor
           device_class: temperature
 
-    history_sensor:
-      name: "Filtered duration today sensor"
+    pump_state_sensor:
+      name: "Pump state sensor"
       description: >
-        Sensor returning the filtration duration already completed today.
-        This is typically a history_stats sensor on the pump state.
+        Entity whose state is `on` when the pump is running. Used to avoid
+        calling start/stop actions unnecessarily at every poll cycle.
+        Typically a switch, input_boolean, binary_sensor or sensor.
       selector:
         entity:
-          domain: sensor
+          domain:
+            - switch
+            - input_boolean
+            - binary_sensor
+            - sensor
 
     # --- Output ------------------------------------------------------------------
 
@@ -61,7 +73,7 @@ blueprint:
         input_number entity where the blueprint writes the calculated target
         filtration duration. The unit is auto-detected from the helper
         (supported: min, h, s — default: min). You can manually adjust this
-        value between the calculation time and the filtration start time.
+        value between calc_time and the start of the filtration window.
       selector:
         entity:
           domain: input_number
@@ -73,14 +85,16 @@ blueprint:
       description: >
         Action(s) executed to start the filtration pump
         (turn on a switch, call a script, activate a scene…).
+        Must be idempotent (safe to call when pump is already running).
       selector:
         action: {}
 
     stop_action:
       name: "Stop filtration action"
       description: >
-        Action(s) executed when the filtered duration reaches the target duration
+        Action(s) executed to stop the filtration pump
         (turn off a switch, call a script, activate a scene…).
+        Must be idempotent (safe to call when pump is already stopped).
       selector:
         action: {}
 
@@ -89,27 +103,35 @@ blueprint:
     calc_time:
       name: "Daily calculation time"
       description: >
-        Time at which the blueprint calculates the target filtration duration and
-        writes it to the input_number.
+        Time at which the blueprint calculates the target filtration duration
+        and writes it to the input_number. Should be set before window_start.
       default: "06:00:00"
       selector:
         time: {}
 
-    start_time:
-      name: "Filtration start time"
+    window_start:
+      name: "Filtration window start"
       description: >
-        Time at which the blueprint executes the start action. The input_number
-        value is read as-is, so it can be manually adjusted after calculation.
-      default: "10:00:00"
+        Start of the daily filtration window. The first cycle begins at this time.
+      default: "08:00:00"
+      selector:
+        time: {}
+
+    window_end:
+      name: "Filtration window end"
+      description: >
+        End of the daily filtration window. The last cycle ends at this time.
+        Must be on the same day as window_start.
+      default: "20:00:00"
       selector:
         time: {}
 
     poll_interval_minutes:
       name: "Verification interval (minutes)"
       description: >
-        Frequency at which the blueprint checks whether the filtered duration has
-        reached the target duration.
-      default: 15
+        Frequency at which the blueprint checks whether the pump should be
+        running or stopped based on the current cycle schedule.
+      default: 5
       selector:
         number:
           min: 1
@@ -118,13 +140,58 @@ blueprint:
           unit_of_measurement: min
           mode: slider
 
+    # --- Cycle parameters --------------------------------------------------------
+
+    cycles_count:
+      name: "Number of cycles"
+      description: >
+        Desired number of filtration cycles per day. The blueprint distributes
+        the total filtration duration evenly across cycles, separated by equal
+        pauses. The actual number of cycles may be auto-adjusted to respect the
+        per-cycle min/max duration constraints.
+      default: 2
+      selector:
+        number:
+          min: 1
+          max: 6
+          step: 1
+          mode: slider
+
+    min_cycle_minutes:
+      name: "Minimum cycle duration (minutes)"
+      description: >
+        If the calculated duration per cycle falls below this value, the number
+        of cycles is reduced until each cycle meets this minimum.
+      default: 60
+      selector:
+        number:
+          min: 15
+          max: 360
+          step: 15
+          unit_of_measurement: min
+          mode: slider
+
+    max_cycle_minutes:
+      name: "Maximum cycle duration (minutes)"
+      description: >
+        If the calculated duration per cycle exceeds this value, the number of
+        cycles is increased until each cycle meets this maximum.
+      default: 240
+      selector:
+        number:
+          min: 30
+          max: 720
+          step: 15
+          unit_of_measurement: min
+          mode: slider
+
     # --- Calculation parameters --------------------------------------------------
 
     filter_coefficient:
       name: "Filtration coefficient"
       description: >
-        Divisor applied to the temperature to calculate the duration.
-        Formula: duration = temperature / coefficient.
+        Divisor applied to the temperature to calculate the total duration.
+        Formula: duration_hours = temperature / coefficient.
         Standard value: 3 (one-third rule).
       default: 3
       selector:
@@ -135,33 +202,23 @@ blueprint:
           unit_of_measurement: "°C/h"
           mode: slider
 
-    min_duration_hours:
-      name: "Minimum filtration duration (hours)"
-      description: >
-        Floor duration: filtration will never be shorter than this value,
-        even if the temperature is very low or the sensor is unavailable.
-      default: 2
-      selector:
-        number:
-          min: 0
-          max: 12
-          step: 0.5
-          unit_of_measurement: h
-          mode: slider
+    # --- External trigger --------------------------------------------------------
 
-    max_duration_hours:
-      name: "Maximum filtration duration (hours)"
+    external_event_type:
+      name: "External trigger event type"
       description: >
-        Ceiling duration: filtration will never exceed this value,
-        even if the temperature is very high.
-      default: 12
+        Custom HA event type that forces an immediate recalculation and
+        cycle re-evaluation. Fire it from another automation or script:
+
+        action: event.fire
+        data:
+          event_type: smart_pool_filtering_run
+
+        Change this value if you run multiple instances of this blueprint
+        (use a unique event type per instance).
+      default: "smart_pool_filtering_run"
       selector:
-        number:
-          min: 1
-          max: 24
-          step: 0.5
-          unit_of_measurement: h
-          mode: slider
+        text: {}
 
 # --- Automation --------------------------------------------------------------
 
@@ -169,41 +226,45 @@ mode: single
 max_exceeded: silent
 
 trigger:
+  # Daily calculation: compute target duration and write to input_number.
   - platform: time
     at: !input calc_time
     id: calc
 
-  - platform: time
-    at: !input start_time
-    id: start
-
-  # The effective interval is controlled by poll_interval_minutes in the action.
-  # This is the standard blueprint-compatible pattern for configurable polling.
+  # Regular polling: check every minute, filtered by poll_interval_minutes.
   - platform: time_pattern
     minutes: "/1"
     id: poll
 
+  # Resume after HA restart: re-evaluate immediately.
+  - platform: homeassistant
+    event: start
+    id: poll
+
+  # External trigger: force recalculation + immediate re-evaluation.
+  - platform: event
+    event_type: !input external_event_type
+    id: external
+
 variables:
-  temperature_sensor: !input temperature_sensor
-  history_sensor: !input history_sensor
+  temperature_sensor:   !input temperature_sensor
+  pump_state_sensor:    !input pump_state_sensor
   duration_input_number: !input duration_input_number
   poll_interval_minutes: !input poll_interval_minutes
-  filter_coefficient: !input filter_coefficient
-  min_duration_hours: !input min_duration_hours
-  max_duration_hours: !input max_duration_hours
+  filter_coefficient:   !input filter_coefficient
+  cycles_count:         !input cycles_count
+  min_cycle_minutes:    !input min_cycle_minutes
+  max_cycle_minutes:    !input max_cycle_minutes
 
+  # Current water temperature (defaults to 0 if sensor unavailable).
   current_temp: >
     {{ states(temperature_sensor) | float(default=0) }}
 
-  # Raw duration in hours from the temperature / coefficient rule,
-  # clamped between min and max (hours), then converted to minutes.
+  # Total filtration duration in minutes (raw, no global clamp).
   calculated_duration_minutes: >
     {% set coeff = filter_coefficient | float(default=3) %}
     {% set temp  = current_temp | float(default=0) %}
-    {% set raw_h = (temp / coeff) if coeff > 0 else 0 %}
-    {% set mn_h  = min_duration_hours | float(default=2) %}
-    {% set mx_h  = max_duration_hours | float(default=12) %}
-    {{ ([mn_h, [mx_h, raw_h] | min] | max * 60) | round(0) | int }}
+    {{ ((temp / coeff * 60) if coeff > 0 else 0) | round(0) | int }}
 
   # Unit declared on the input_number helper (min / h / s). Fallback: min.
   input_number_unit: >
@@ -212,8 +273,8 @@ variables:
   # Value to WRITE into the input_number: internal minutes → target unit.
   calculated_duration_output: >
     {% set v = calculated_duration_minutes | float(default=0) %}
-    {{ (v / 60)  | round(2) if input_number_unit == 'h' else
-       (v * 60)  | round(0) | int if input_number_unit == 's' else
+    {{ (v / 60)  | round(2)         if input_number_unit == 'h' else
+       (v * 60)  | round(0) | int   if input_number_unit == 's' else
         v        | round(0) | int }}
 
   # Value READ from the input_number, converted back to internal minutes.
@@ -223,15 +284,88 @@ variables:
        (raw / 60) if input_number_unit == 's' else
         raw }}
 
-  filtered_duration_minutes: >
-    {% set raw  = states(history_sensor) | float(default=0) %}
-    {% set unit = state_attr(history_sensor, 'unit_of_measurement') | default('h') %}
-    {{ (raw * 60 if unit == 'h' else raw) | round(1) }}
+  # Window boundaries in minutes since midnight.
+  window_start_min: >
+    {% set t = today_at(!input window_start) %}
+    {{ t.hour * 60 + t.minute }}
+
+  window_end_min: >
+    {% set t = today_at(!input window_end) %}
+    {{ t.hour * 60 + t.minute }}
+
+  # Cycle schedule: compute N and build the list of [start, end] slots.
+  # All values in minutes since midnight.
+  # Returns a list of dicts: [{start: X, end: Y}, ...]
+  cycle_slots: >
+    {% set total   = target_duration_minutes | float(default=0) %}
+    {% set ws      = window_start_min | float(default=480) %}
+    {% set we      = window_end_min   | float(default=1200) %}
+    {% set window  = we - ws %}
+    {% set mn      = min_cycle_minutes | float(default=60) %}
+    {% set mx      = max_cycle_minutes | float(default=240) %}
+    {% set n_want  = cycles_count | int(default=2) %}
+
+    {# Edge case: zero or negative total → no cycles #}
+    {% if total <= 0 or window <= 0 %}
+      {{ [] }}
+    {% elif total >= window %}
+      {# Filtration fills (or exceeds) the whole window → single full-window cycle #}
+      {{ [{'start': ws | round(1), 'end': we | round(1)}] }}
+    {% else %}
+      {# Adjust N to respect per-cycle min/max constraints #}
+      {% set ns = namespace(n=n_want) %}
+      {% set ns.cycle = total / ns.n %}
+
+      {# If cycle too long → increase N (more cycles, shorter each) #}
+      {% for _ in range(6) %}
+        {% if ns.cycle > mx and ns.n < 6 %}
+          {% set ns.n = ns.n + 1 %}
+          {% set ns.cycle = total / ns.n %}
+        {% endif %}
+      {% endfor %}
+
+      {# If cycle too short → decrease N (fewer cycles, longer each) #}
+      {% for _ in range(6) %}
+        {% if ns.cycle < mn and ns.n > 1 %}
+          {% set ns.n = ns.n - 1 %}
+          {% set ns.cycle = total / ns.n %}
+        {% endif %}
+      {% endfor %}
+
+      {# Compute equal pauses between cycles #}
+      {% set n_final = ns.n %}
+      {% set cycle_dur = total / n_final %}
+      {% set pause = (window - total) / (n_final - 1) if n_final > 1 else 0 %}
+
+      {# Build slot list #}
+      {% set slots = namespace(list=[]) %}
+      {% for i in range(n_final) %}
+        {% set s = ws + i * (cycle_dur + pause) %}
+        {% set e = s + cycle_dur %}
+        {% set slots.list = slots.list + [{'start': s | round(1), 'end': e | round(1)}] %}
+      {% endfor %}
+      {{ slots.list }}
+    {% endif %}
+
+  # True if current time falls inside any cycle slot.
+  in_active_cycle: >
+    {% set now_min = now().hour * 60 + now().minute %}
+    {% set active = namespace(found=false) %}
+    {% for slot in cycle_slots %}
+      {% if slot.start <= now_min < slot.end %}
+        {% set active.found = true %}
+      {% endif %}
+    {% endfor %}
+    {{ active.found }}
+
+  # True if the pump is currently running.
+  pump_is_on: >
+    {{ states(pump_state_sensor) in ['on', 'true', 'home', 'open'] }}
 
 action:
   - choose:
 
-      # ── Daily calculation ------------------------------------------------------
+      # ── Daily calculation -------------------------------------------------------
       - conditions:
           - condition: trigger
             id: calc
@@ -246,68 +380,94 @@ action:
             data:
               level: info
               message: >
-                [Smart Pool Filtering] Calculated daily target duration:
-                {{ calculated_duration_minutes }}min
+                [Smart Pool Filtering] Daily calculation complete.
+                Temp={{ current_temp | round(1) }}°C  Coeff={{ filter_coefficient }}
+                Total={{ calculated_duration_minutes }}min
                 → written as {{ calculated_duration_output }}{{ input_number_unit }}
-                into {{ duration_input_number }}
-                (temp={{ current_temp | float(default=0) | round(1) }}°C,
-                coeff={{ filter_coefficient }},
-                min={{ min_duration_hours }}h, max={{ max_duration_hours }}h).
-                The input_number can be manually adjusted before filtration starts.
+                Cycles={{ cycles_count }} (min={{ min_cycle_minutes }}min,
+                max={{ max_cycle_minutes }}min).
+                Adjust the input_number before the window opens if needed.
 
-      # ── Start filtration -------------------------------------------------------
+      # ── External trigger: recalculate then evaluate immediately ----------------
       - conditions:
           - condition: trigger
-            id: start
+            id: external
         sequence:
-          - if:
-              - condition: template
-                value_template: "{{ target_duration_minutes | float(default=0) <= 0 }}"
-            then:
-              - action: system_log.write
-                data:
-                  level: warning
-                  message: >
-                    [Smart Pool Filtering] Filtration start skipped because target
-                    duration is {{ target_duration_minutes | float(default=0) | round(1) }}min.
-
-              - stop: "Target filtration duration is zero."
-
-          - sequence: !input start_action
+          # Step 1 — Recalculate and write to input_number
+          - action: input_number.set_value
+            target:
+              entity_id: !input duration_input_number
+            data:
+              value: "{{ calculated_duration_output }}"
 
           - action: system_log.write
             data:
               level: info
               message: >
-                [Smart Pool Filtering] Filtration started.
-                Target={{ target_duration_minutes | float(default=0) | round(1) }}min
-                (read {{ states(duration_input_number) | round(2) }}{{ input_number_unit }}
-                from {{ duration_input_number }}).
+                [Smart Pool Filtering] External trigger received. Recalculated:
+                Temp={{ current_temp | round(1) }}°C  Coeff={{ filter_coefficient }}
+                Total={{ calculated_duration_minutes }}min
+                → written as {{ calculated_duration_output }}{{ input_number_unit }}.
+                Evaluating cycle schedule immediately.
 
-      # ── Regular quota verification -------------------------------------------
+          # Step 2 — Immediate cycle evaluation (same logic as poll)
+          - if:
+              - condition: template
+                value_template: "{{ in_active_cycle and not pump_is_on }}"
+            then:
+              - sequence: !input start_action
+              - action: system_log.write
+                data:
+                  level: info
+                  message: >
+                    [Smart Pool Filtering] External trigger: inside a cycle,
+                    pump was off → start_action executed.
+                    Slots={{ cycle_slots }}
+
+          - if:
+              - condition: template
+                value_template: "{{ not in_active_cycle and pump_is_on }}"
+            then:
+              - sequence: !input stop_action
+              - action: system_log.write
+                data:
+                  level: info
+                  message: >
+                    [Smart Pool Filtering] External trigger: outside any cycle,
+                    pump was on → stop_action executed.
+                    Slots={{ cycle_slots }}
+
+      # ── Regular polling ---------------------------------------------------------
       - conditions:
           - condition: trigger
             id: poll
           - condition: template
             value_template: >
-              {% set interval = poll_interval_minutes | int(default=15) %}
+              {% set interval = poll_interval_minutes | int(default=5) %}
               {{ interval > 0 and now().minute % interval == 0 }}
         sequence:
           - if:
               - condition: template
-                value_template: >
-                  {{ target_duration_minutes | float(default=0) > 0 and
-                     filtered_duration_minutes | float(default=0) >=
-                     target_duration_minutes | float(default=0) }}
+                value_template: "{{ in_active_cycle and not pump_is_on }}"
             then:
-              - sequence: !input stop_action
-
+              - sequence: !input start_action
               - action: system_log.write
                 data:
                   level: info
                   message: >
-                    [Smart Pool Filtering] Target duration reached. Stopping filtration.
-                    Filtered={{ filtered_duration_minutes | float(default=0) | round(1) }}min
-                    Target={{ target_duration_minutes | float(default=0) | round(1) }}min.
+                    [Smart Pool Filtering] Poll: entering cycle window,
+                    pump was off → start_action executed.
+                    Slots={{ cycle_slots }}
 
-              - stop: "Target filtration duration reached."
+          - if:
+              - condition: template
+                value_template: "{{ not in_active_cycle and pump_is_on }}"
+            then:
+              - sequence: !input stop_action
+              - action: system_log.write
+                data:
+                  level: info
+                  message: >
+                    [Smart Pool Filtering] Poll: outside cycle window,
+                    pump was on → stop_action executed.
+                    Slots={{ cycle_slots }}
